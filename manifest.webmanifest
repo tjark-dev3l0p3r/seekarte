@@ -1,10 +1,10 @@
 {
   "name": "Seekarte Live",
   "short_name": "Seekarte",
-  "description": "Seekarte mit Live-AIS",
+  "description": "Seekarte mit Live-AIS, Gezeiten und Tiefen",
   "start_url": "./",
   "scope": "./",
-  "display": "fullscreen",
+  "display": "standalone",
   "orientation": "any",
   "background_color": "#0b2236",
   "theme_color": "#0b2236",
