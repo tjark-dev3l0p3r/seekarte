@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Seekarte Live</title>
-<meta name="description" content="Seekarte mit Live-AIS für Tablet">
-<meta name="theme-color" content="#0b2236">
+<meta name="description" content="Seekarte mit Live-AIS für das Tablet an Bord">
+<meta name="theme-color" content="#0f2130">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -13,118 +13,69 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="apple-touch-icon" href="icon-180.png">
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
-<link rel="stylesheet" href="app.css?v=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/4.7.1/maplibre-gl.min.css" crossorigin="anonymous">
+<link rel="stylesheet" href="app.css?v=2.1.0">
 </head>
 <body>
-<div id="map"></div>
+<div id="map" aria-label="Seekarte"></div>
+<canvas id="edge" aria-hidden="true"></canvas>
 
-<!-- Kopfzeile: eigene Navigationsdaten -->
-<header id="nav">
-  <div class="cell wide"><span class="lbl">Position</span><span id="nPos" class="val mono">—</span></div>
-  <div class="cell"><span class="lbl">Fahrt</span><span class="val"><b id="nSog">—</b><small> kn</small></span></div>
-  <div class="cell"><span class="lbl">Kurs</span><span class="val"><b id="nCog">—</b><small>°</small></span></div>
-  <div class="cell hide-s"><span class="lbl">Steuerkurs</span><span class="val"><b id="nHdg">—</b><small>°</small></span></div>
-  <div class="cell"><span class="lbl">Quelle</span><span id="nSrc" class="badge">—</span></div>
-  <div class="cell"><span class="lbl">AIS</span><span id="nAis" class="badge">—</span></div>
-  <div class="cell hide-s"><span class="lbl">Zeit</span><span id="nTime" class="val mono">—</span></div>
+<!-- Instrumentenleiste -->
+<header id="strip">
+  <div class="inst" data-k="sog"><span class="cap">Fahrt · SOG</span><span class="num"><b id="vSog">–</b><i id="vSogU">kn</i></span></div>
+  <div class="inst" data-k="cog"><span class="cap">Kurs · COG</span><span class="num"><b id="vCog">–</b><i>°</i></span></div>
+  <div class="inst opt" data-k="hdg"><span class="cap">Voraus · HDG</span><span class="num"><b id="vHdg">–</b><i>°</i></span></div>
+  <div class="inst pos"><span class="cap">Position <em id="vSrc" class="src">–</em></span><span class="coord"><span id="vLat">–</span><span id="vLon">–</span></span></div>
+  <button class="inst tide" id="iTide" type="button" hidden><span class="cap" id="tideCap">Tide</span><span class="num"><b id="vTide">–</b><i id="vTideU">m</i></span><small id="vTideSub"></small></button>
+  <div class="inst km" id="iKm" hidden><span class="cap">NOK-km</span><span class="num"><b id="vKm">–</b></span></div>
+  <div class="grow"></div>
+  <button class="chip" id="cAis" type="button"><span class="dot"></span><span id="vAis">AIS</span></button>
+  <div class="inst clock opt"><span class="cap">Bordzeit <em id="vTz"></em></span><span class="num"><b id="vTime">–</b></span></div>
 </header>
 
-<div id="alarm" hidden></div>
+<div id="alert" role="alert" hidden></div>
+<div id="toast" role="status" hidden></div>
 
-<!-- Werkzeugleiste rechts -->
-<nav id="tools">
-  <button id="bFollow" class="tb" title="Eigenes Schiff folgen"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/><circle cx="12" cy="12" r="7.5" fill="none"/></svg><span>Folgen</span></button>
-  <button id="bList" class="tb" title="Schiffsliste"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg><span>Schiffe</span></button>
-  <button id="bLayers" class="tb" title="Karten-Ebenen"><svg viewBox="0 0 24 24"><path d="M12 3 2 8l10 5 10-5-10-5Z"/><path d="m2 13 10 5 10-5"/></svg><span>Karte</span></button>
-  <button id="bTheme" class="tb" title="Tag/Nacht"><svg viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5Z"/></svg><span id="themeLbl">Tag</span></button>
-  <button id="bMeasure" class="tb" title="Entfernung messen"><svg viewBox="0 0 24 24"><path d="m3 17 14-14 4 4L7 21Z"/><path d="m7 13 2 2M10 10l2 2M13 7l2 2"/></svg><span>Messen</span></button>
-  <button id="bSettings" class="tb" title="Einstellungen"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/></svg><span>Setup</span></button>
-  <button id="bHelp" class="tb" title="Hilfe"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.5"/><path d="M9.5 9.5a2.6 2.6 0 1 1 3.6 2.4c-.8.4-1.1 1-1.1 1.8v.6"/><circle cx="12" cy="17.3" r=".6"/></svg><span>Hilfe</span></button>
+<!-- Werkzeuge -->
+<nav id="rail" aria-label="Werkzeuge">
+  <button id="tFollow" class="rb" type="button"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2.4" class="f"/><path d="M12 1.5v4M12 18.5v4M1.5 12h4M18.5 12h4"/></svg><span>Folgen</span></button>
+  <button id="tOrient" class="rb" type="button"><svg viewBox="0 0 24 24" id="orientIco"><path d="M12 3l4.5 10H7.5L12 3Z" class="f"/><path d="M7.5 13 12 21l4.5-8"/></svg><span id="orientLbl">Nord oben</span></button>
+  <span class="sep"></span>
+  <button id="tList" class="rb" type="button"><svg viewBox="0 0 24 24"><path d="M12 3 18 18 12 15 6 18Z"/><path d="M3 21h18" /></svg><span>Schiffe</span><em id="listBadge" hidden></em></button>
+  <button id="tLayers" class="rb" type="button"><svg viewBox="0 0 24 24"><path d="M12 3 2.5 8 12 13l9.5-5L12 3Z"/><path d="m2.5 12.5 9.5 5 9.5-5"/><path d="m2.5 16.5 9.5 5 9.5-5"/></svg><span>Karte</span></button>
+  <button id="tTheme" class="rb" type="button"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 0 18Z" class="f"/><circle cx="12" cy="12" r="9"/></svg><span id="themeLbl">Tag</span></button>
+  <button id="tMeasure" class="rb" type="button"><svg viewBox="0 0 24 24"><circle cx="5" cy="19" r="2"/><circle cx="19" cy="5" r="2"/><path d="M6.6 17.4 17.4 6.6" stroke-dasharray="2.2 2.2"/></svg><span>Messen</span></button>
+  <span class="sep"></span>
+  <button id="tSettings" class="rb" type="button"><svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2.2"/><circle cx="10" cy="17" r="2.2"/></svg><span>Setup</span></button>
+  <button id="tMob" class="rb mob" type="button" aria-label="Mann über Bord markieren"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4"/><path d="M12 3.5v4.5M12 16v4.5M3.5 12H8M16 12h4.5"/></svg><span>MOB</span></button>
+  <button id="tHelp" class="rb" type="button"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.4a2.5 2.5 0 1 1 3.4 2.3c-.7.3-1 .9-1 1.6v.5"/><circle cx="12" cy="16.9" r=".4" class="f"/></svg><span>Hilfe</span></button>
 </nav>
 
-<!-- Zoom -->
 <div id="zoom">
-  <button id="zIn" class="tb sq" aria-label="Hineinzoomen">+</button>
-  <button id="zOut" class="tb sq" aria-label="Herauszoomen">−</button>
+  <button id="zIn" class="rb sq" type="button" aria-label="Hineinzoomen"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+  <button id="zOut" class="rb sq" type="button" aria-label="Herauszoomen"><svg viewBox="0 0 24 24"><path d="M5 12h14"/></svg></button>
 </div>
 
-<div id="measureInfo" hidden></div>
-<div id="cursorInfo" class="mono"></div>
+<!-- Info unten links: nächstes Schiff / Messung / Tipp-Position -->
+<div id="hud">
+  <button id="mobCard" type="button" hidden></button>
+  <button id="near" type="button" hidden></button>
+  <div id="probe" hidden></div>
+</div>
 
-<!-- Seitenpanel: Liste / Ebenen / Einstellungen -->
-<aside id="panel" hidden>
-  <div class="phead"><h2 id="pTitle"></h2><button class="x" data-close>✕</button></div>
-  <div id="pBody"></div>
+<!-- Seitenfach (Liste, Karte, Setup, Schiff) -->
+<aside id="drawer" hidden>
+  <div class="dhead"><h2 id="dTitle"></h2><button class="close" type="button" id="dClose" aria-label="Schließen"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+  <div id="dBody"></div>
 </aside>
 
-<!-- Detailkarte eines Schiffs -->
-<section id="sheet" hidden>
-  <div class="phead"><h2 id="sTitle"></h2><button class="x" data-close-sheet>✕</button></div>
-  <div id="sBody"></div>
-</section>
+<!-- Hilfe & Einrichtung -->
+<div id="modal" hidden><div class="mbox" role="dialog" aria-modal="true"><div id="mBody"></div></div></div>
 
-<!-- Hilfe -->
-<div id="help" hidden>
-  <div class="helpbox">
-    <div class="phead"><h2>So funktioniert die Seekarte</h2><button class="x" data-close-help>✕</button></div>
-    <div class="helptext">
-      <h3>1. Was sehe ich?</h3>
-      <p>Eine Seekarte (OpenStreetMap + OpenSeaMap mit Tonnen, Leuchtfeuern, Fahrwassern) und darauf
-      <b>alle Schiffe in der Nähe, live über AIS</b>. Jedes Schiff ist ein Dreieck, die Spitze zeigt den Kurs.
-      Die Linie vor dem Schiff zeigt, wo es in den nächsten Minuten sein wird (einstellbar, Standard 6 Min.).
-      Liegende Schiffe (unter 0,5 kn) sind Kreise. Nah herangezoomt werden Schiffe in echter Größe gezeichnet.</p>
-      <div class="legend" id="legend"></div>
-      <p>Verblasste Schiffe haben seit über 6 Minuten nichts gesendet. Nach 20 Minuten verschwinden sie.</p>
-
-      <h3>2. Eigenes Schiff (der orange Pfeil)</h3>
-      <p>Die Position des eigenen Schiffs kommt aus einer von drei Quellen (unter <b>Setup → Positionsquelle</b>):</p>
-      <ul>
-        <li><b>GPS (Tablet)</b> – das GPS im Tablet. Funktioniert nur, wenn das Tablet einen GPS-Empfänger hat
-        (iPad nur mit Mobilfunk/SIM, die meisten Android-Tablets ja) und du den Standort erlaubst.</li>
-        <li><b>AIS (eigenes Schiff)</b> – die Position, die die AIS-Anlage deines Schiffs sendet.
-        Dafür unter Setup die <b>MMSI deines Schiffs</b> eintragen (9 Ziffern, steht auf der AIS-Anlage bzw. im Funkzeugnis).
-        Gut, wenn das Tablet kein GPS hat oder es im Steuerhaus schlecht ist.</li>
-        <li><b>Kombiniert (empfohlen)</b> – nimmt beide und bildet einen gewichteten Mittelwert: die genauere
-        und frischere Quelle zählt mehr. Die AIS-Position wird dabei mit Fahrt und Kurs auf „jetzt" hochgerechnet,
-        weil AIS nur alle paar Sekunden sendet. Fällt eine Quelle aus, läuft es automatisch mit der anderen weiter.</li>
-      </ul>
-      <p>Oben unter <b>Quelle</b> steht, was gerade benutzt wird, und unter Setup siehst du den Abstand
-      zwischen GPS und AIS (ein paar Meter sind normal – die Antennen sitzen an verschiedenen Stellen).</p>
-
-      <h3>3. Bedienung</h3>
-      <ul>
-        <li><b>Folgen</b> – Karte bleibt auf dem eigenen Schiff. Sobald du die Karte verschiebst, hört sie auf zu folgen; nochmal tippen.</li>
-        <li><b>Schiff antippen</b> – zeigt Name, Typ, Fahrt, Kurs, Ziel, Größe, Abstand und <b>CPA/TCPA</b>.</li>
-        <li><b>Schiffe</b> – Liste aller Schiffe, nach Entfernung sortiert, mit Suche.</li>
-        <li><b>Karte</b> – Ebenen ein/aus: Seezeichen, Wassertiefen, Satellitenbild, Abstandsringe, Namen, eigener Track.</li>
-        <li><b>Tag / Dämmerung / Nacht</b> – Nacht ist rot-dunkel, damit die Augen nachts nicht geblendet werden.
-        „Auto" schaltet nach Sonnenstand.</li>
-        <li><b>Messen</b> – zwei oder mehr Punkte antippen: Entfernung in Seemeilen und Peilung. Nochmal tippen beendet.</li>
-      </ul>
-
-      <h3>4. CPA-Warnung</h3>
-      <p><b>CPA</b> = engste Annäherung (wie nah kommt das Schiff mir), <b>TCPA</b> = in wie vielen Minuten.
-      Kommt ein Schiff näher als eingestellt (Standard 0,3 sm in den nächsten 12 Min.), wird es rot,
-      oben erscheint ein Hinweis und – wenn eingeschaltet – ertönt ein Ton. Einstellbar unter Setup.</p>
-
-      <h3>5. Aufs Tablet holen</h3>
-      <ul>
-        <li><b>iPad:</b> Seite in Safari öffnen → Teilen-Symbol → „Zum Home-Bildschirm". Dann startet sie wie eine App im Vollbild.</li>
-        <li><b>Android:</b> In Chrome ⋮-Menü → „App installieren" bzw. „Zum Startbildschirm hinzufügen".</li>
-        <li>Standort-Freigabe erlauben, wenn gefragt. Bildschirm bleibt an, solange die Seite offen ist.</li>
-      </ul>
-
-      <h3>6. Wichtig</h3>
-      <p class="warn">Diese Karte ist eine <b>Hilfe, kein zugelassenes Navigationsgerät</b> (kein ECDIS).
-      AIS zeigt nur Schiffe, die AIS senden, und die Daten kommen übers Internet mit ein paar Sekunden Verzögerung.
-      Ohne Internet gibt es keine AIS-Ziele. Immer Ausguck halten und das Radar / die amtliche Karte benutzen.</p>
-      <p class="small">Daten: © OpenStreetMap-Mitwirkende, © OpenSeaMap, Tiefen © EMODnet Bathymetry, Satellit © Esri, AIS über aisstream.io.</p>
-    </div>
-  </div>
-</div>
-
-<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-<script src="app.js?v=1"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/4.7.1/maplibre-gl.js" crossorigin="anonymous"></script>
+<script src="app.js?v=2.1.0"></script>
 </body>
 </html>
