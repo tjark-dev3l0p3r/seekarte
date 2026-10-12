@@ -1,6 +1,7 @@
-// Service Worker Seekarte Live: App startet offline; Karten-/Tiefenkacheln: Cache zuerst (≤ 7 Tage), im Hintergrund aufgefrischt.
-// Neue Version wartet, bis die Seite "skip" schickt (Hinweis „Neue Version verfügbar").
-const VER = '2.1.0', APP = 'sk-app-' + VER, TILES = 'sk-tiles-3', DATA = 'sk-data-1';
+// Service Worker Seekarte Live: App startet offline; Karten-/Tiefenkacheln: Cache zuerst (≤ 7 Tage frisch → kein Netzabruf,
+// sonst aus dem Cache sofort anzeigen und im Hintergrund auffrischen). Eigener Zeitstempel, weil "Date" bei CORS nicht lesbar ist.
+// Neue Version wartet, bis die Seite "skip" schickt (Hinweis „Neue Version verfügbar“).
+const VER = '2.2.0', APP = 'sk-app-' + VER, TILES = 'sk-tiles-4', DATA = 'sk-data-1';
 const CDN = 'https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/4.7.1/';
 const SHELL = ['./', 'index.html', 'app.css?v=' + VER, 'app.js?v=' + VER, 'manifest.webmanifest', 'icon.svg', 'icon-180.png', 'nok_km.json', 'gauges.json', CDN + 'maplibre-gl.js', CDN + 'maplibre-gl.min.css'];
 self.addEventListener('install', (e) => {
@@ -10,7 +11,11 @@ self.addEventListener('message', (e) => { if (e.data === 'skip') self.skipWaitin
 self.addEventListener('activate', (e) => {
   e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => ![APP, TILES, DATA].includes(k)).map((k) => caches.delete(k)))).then(() => self.clients.claim()).then(() => trim()));
 });
-async function trim(max = 5000) { const c = await caches.open(TILES), k = await c.keys(); for (const r of k.slice(0, Math.max(0, k.length - max))) await c.delete(r); }
+async function trim(max = 6000) { const c = await caches.open(TILES), k = await c.keys(); for (const r of k.slice(0, Math.max(0, k.length - max))) await c.delete(r); }
+async function stamp(r) { // Antwort mit eigenem Zeitstempel speichern
+  const h = new Headers(r.headers); h.set('sw-t', String(Date.now()));
+  return new Response(await r.blob(), { status: r.status, statusText: r.statusText, headers: h });
+}
 const TILE_HOSTS = /tiles\.openfreemap\.org|tiles\.openseamap\.org|arcgisonline\.com|emodnet-bathymetry\.eu|fonts\.gstatic\.com/;
 self.addEventListener('fetch', (e) => {
   const u = new URL(e.request.url);
@@ -18,9 +23,12 @@ self.addEventListener('fetch', (e) => {
   if (TILE_HOSTS.test(u.host)) {
     e.respondWith((async () => {
       const c = await caches.open(TILES), hit = await c.match(e.request);
-      const fresh = hit && Date.now() - Date.parse(hit.headers.get('date') || 0) < 7 * 864e5;
-      const net = fetch(e.request).then((r) => { if (r.ok && r.type !== 'opaque') e.waitUntil(c.put(e.request, r.clone()).then(() => Math.random() < 0.02 && trim()).catch(() => {})); return r; });
-      if (fresh) { e.waitUntil(net.catch(() => {})); return hit; }
+      const age = hit ? Date.now() - Number(hit.headers.get('sw-t') || 0) : Infinity;
+      if (hit && age < 7 * 864e5) return hit; // frisch genug: kein Datenverbrauch an Bord
+      const net = fetch(e.request).then(async (r) => {
+        if (r.ok && r.type !== 'opaque') e.waitUntil(stamp(r.clone()).then((x) => c.put(e.request, x)).then(() => Math.random() < 0.02 && trim()).catch(() => {}));
+        return r;
+      });
       if (hit) { e.waitUntil(net.catch(() => {})); return hit; }
       return net.catch(() => Response.error());
     })());
