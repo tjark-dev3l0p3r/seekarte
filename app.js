@@ -409,7 +409,7 @@ function render() {
   nearest = null;
   for (const [m, t] of ships) {
     if (t.la == null) continue;
-    if (now - t.ts > DROP_MS && (S.demo || (linkOk() && now - linkSince > 20000))) { ships.delete(m); continue; } // bei Abbruch: halten
+    if (now - t.ts > (t.s >= 0.5 ? DROP_MS : 3 * DROP_MS) && (S.demo || (linkOk() && now - linkSince > 20000))) { ships.delete(m); continue; } // liegende 60 min, fahrende 20 min; bei Abbruch: halten
     if (m === ownM && own) continue;
     const p = shipPos(t, now), stale = now - t.ts > STALE_MS; t.p = p;
     if (own) { const c = cpa(own, { lat: p.lat, lon: p.lon, s: t.s, c: t.c }); t.cpa = c.cpa; t.tcpa = c.tcpa; t.dist = distM(own, p); t.brg = brg(own, p); }
