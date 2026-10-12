@@ -321,3 +321,5 @@ details.expert[open] summary::before{content:"▾ ";}
 #suggest b{font-size:18px}
 #suggest .row2{display:flex;gap:8px;margin-top:6px}
 .tag{font-style:normal;font-size:11px;font-weight:700;color:var(--own);border:1.5px solid var(--own);border-radius:6px;padding:0 5px;margin-left:6px;vertical-align:2px}
+.inst.tide.shoal .num b,.inst.tide.shoal small{color:var(--danger)}
+.inst.tide.warn .num b{color:var(--caution)}
