@@ -2,7 +2,7 @@
    Eigene Position: Tablet-GPS, eigenes AIS (MMSI) oder gewichtetes Mittel aus beidem. */
 'use strict';
 
-const VERSION = '2.1.0';
+const VERSION = '2.2.0';
 const RELAY_URL = 'wss://twybfsbfbxvwwxbdphum.supabase.co/functions/v1/ais-relay';
 const NM = 1852, KN = 1852 / 3600;
 const STALE_MS = 6 * 60e3, DROP_MS = 20 * 60e3;
@@ -340,7 +340,8 @@ function fuse() {
   if (!cands.length) { own = null; return; }
   let p;
   if (cands.length === 2 && distM(cands[0], cands[1]) > 500 + 3 * (cands[0].sig + cands[1].sig)) {
-    const a = cands.find((c) => c.k === 'AIS'); p = { ...a, src: 'AIS', note: 'GPS weicht stark ab' }; // frische AIS-Position gewinnt
+    const a = cands.find((c) => c.k === 'AIS'), g = cands.find((c) => c.k === 'GPS');
+    p = a.age < 60000 ? { ...a, src: 'AIS', note: 'GPS weicht stark ab' } : { ...g, src: 'GPS', note: 'AIS veraltet' }; // nur frisches AIS gewinnt
   } else if (cands.length === 1) p = { ...cands[0], src: cands[0].k };
   else {
     const ref = cands[0]; let sx = 0, sy = 0, sw = 0;
@@ -384,7 +385,7 @@ setInterval(() => {
   store('sk_static', statics);
 }, 30000);
 function shipPos(t, now) { // Koppelort: aisstream liefert je Schiff nur etwa alle 30–60 s eine Position
-  const age = Math.min((now - t.ts) / 1000, 180);
+  const age = Math.min((now - t.ts) / 1000, STALE_MS / 1000);
   return t.s > 0.5 && t.c != null && age > 0 ? move({ lat: t.la, lon: t.lo }, t.c, t.s * KN * age) : { lat: t.la, lon: t.lo };
 }
 function hullRing(t, p) {
@@ -413,7 +414,7 @@ function render() {
     const p = shipPos(t, now), stale = now - t.ts > STALE_MS; t.p = p;
     if (own) { const c = cpa(own, { lat: p.lat, lon: p.lon, s: t.s, c: t.c }); t.cpa = c.cpa; t.tcpa = c.tcpa; t.dist = distM(own, p); t.brg = brg(own, p); }
     else t.cpa = t.tcpa = t.dist = t.brg = null;
-    t.sart = isSart(t) && !stale;
+    t.sart = isSart(t) && !stale && (t.dist == null || t.dist < 12 * NM); // Notfall-Sender: Alarm im Umkreis von 12 sm
     const dg = t.sart || (S.alarm && own && !stale && t.tcpa > 0 && t.tcpa < S.tcpaMin * 60 && t.cpa < S.cpaNm * NM && (t.s > 0.5 || own.sog > 0.5)) ? 1 : 0;
     t.dg = dg; if (dg) nd.push(t);
     if (!visible(t) && !dg) continue;
@@ -427,7 +428,7 @@ function render() {
       const e = move(p, t.c, t.s * KN * S.vecMin * 60);
       lines.push({ type: 'Feature', geometry: { type: 'LineString', coordinates: [ll(p), ll(e)] }, properties: { k: 'vec', col: dg ? P.danger : P.vec, dg } });
     }
-    if (z >= 14.5) { const h = hullRing(t, p); if (h) lines.push({ type: 'Feature', geometry: { type: 'Polygon', coordinates: [h] }, properties: { k: 'hull', col: C[k], dg } }); }
+    if (z >= 14.5) { const h = hullRing(t, p); if (h) lines.push({ type: 'Feature', geometry: { type: 'Polygon', coordinates: [h] }, properties: { k: 'hull', col: C[k], dg, m } }); }
     if (selected === m && t.trk.length > 1) lines.push({ type: 'Feature', geometry: { type: 'LineString', coordinates: t.trk.map(ll).concat([ll(p)]) }, properties: { k: 'trk' } });
     // CPA-Grafik: wo stehen beide Schiffe im Moment der engsten Annäherung?
     if (selected === m && own && t.tcpa > 0 && t.tcpa < 3600 && own.cog != null) {
@@ -549,7 +550,7 @@ function halo(t, x, y, P) { eg.lineWidth = 3; eg.strokeStyle = P.scalePaper; eg.
    Robustheit: Lebenszeichen-Wache (35 s ohne Daten → neu verbinden), sofortiger Wiederaufbau nach Abbruch,
    Schiffe bleiben während einer Unterbrechung stehen (werden gespeichert) und werden nicht gelöscht. */
 let ws = null, wsRetry = 0, subBox = null, retryTimer = null, hideTimer = null, pingTimer = null, connectedAt = 0, lastRx = 0, linkSince = 0, lostAt = 0;
-let relayMode = '', collectorOk = true;
+let sockStart = 0, relayMode = '', collectorOk = true, rotTimer = null, maxSrvTs = 0, lastBoxSent = null, firstSub = true;
 function wantBox() {
   const b = map.getBounds(), c = map.getCenter();
   let s = b.getSouth(), n = b.getNorth(), w = b.getWest(), e = b.getEast();
@@ -559,8 +560,9 @@ function wantBox() {
   // Mindestgröße ~ 70 × 70 sm, damit beim Öffnen sofort etwas im Umfeld zu sehen ist
   if (n - s < 1.2) { const m = (n + s) / 2; s = m - .6; n = m + .6; }
   if (e - w < 2) { const m = (e + w) / 2; w = m - 1; e = m + 1; }
-  if (n - s > 3) { s = c.lat - 1.5; n = c.lat + 1.5; }
-  if (e - w > 5) { w = c.lng - 2.5; e = c.lng + 2.5; }
+  const k = p ? { lat: p.lat, lng: p.lon } : c; // Kappung um das eigene Schiff, damit sein Umfeld nie herausfällt
+  if (n - s > 3) { s = k.lat - 1.5; n = k.lat + 1.5; }
+  if (e - w > 5) { w = k.lng - 2.5; e = k.lng + 2.5; }
   const r = (x) => Math.round(x * 1000) / 1000;
   return [[r(Math.max(-89, s)), r(w)], [r(Math.min(89, n)), r(e)]];
 }
@@ -570,19 +572,25 @@ function maybeSub(force) {
   if (!ws || ws.readyState !== 1) return;
   const want = wantBox();
   if (!force && contains(subBox, want) && area(subBox) < area(want) * 4) return;
-  subBox = want;
-  const msg = { bbox: want, v: VERSION }; if (S.key) msg.key = S.key;
+  const pl = (want[1][0] - want[0][0]) * .25, po = (want[1][1] - want[0][1]) * .25, r3 = (x) => Math.round(x * 1000) / 1000;
+  const sent = [[r3(want[0][0] - pl), r3(want[0][1] - po)], [r3(want[1][0] + pl), r3(want[1][1] + po)]];
+  // nach Wiederverbindung im selben Gebiet nur die Änderungen holen (spart Daten an Bord)
+  const since = firstSub && maxSrvTs && contains(lastBoxSent, want) ? maxSrvTs - 5000 : 0;
+  subBox = sent; lastBoxSent = sent; firstSub = false;
+  const msg = { bbox: sent, v: VERSION }; if (since) msg.since = since; if (S.key) msg.key = S.key;
   ws.send(JSON.stringify(msg));
 }
-const linkOk = () => !!ws && ws.readyState === 1 && Date.now() - lastRx < 25000 && aisState.state === 'live';
+const linkOk = () => !!ws && ws.readyState <= 1 && Date.now() - lastRx < 25000 && aisState.state === 'live';
 function connect() {
   if (S.demo || ws || document.hidden) return;
   clearTimeout(retryTimer);
   if (aisState.state !== 'live') setAis('connecting');
-  let sock;
+  let sock, opened = false;
   try { sock = ws = new WebSocket(RELAY_URL); } catch (_) { ws = null; retry(); return; }
+  sockStart = Date.now();
   sock.onopen = () => {
-    connectedAt = lastRx = Date.now(); subBox = null; maybeSub(true);
+    opened = true; connectedAt = lastRx = Date.now(); subBox = null; firstSub = true; maybeSub(true);
+    clearTimeout(rotTimer); rotTimer = setTimeout(rotate, 130000); // Server trennt nach ~150 s → vorher nahtlos wechseln
     clearInterval(pingTimer); pingTimer = setInterval(() => { if (ws === sock && sock.readyState === 1) sock.send('{"ping":1}'); }, 20000);
   };
   sock.onmessage = (ev) => {
@@ -592,19 +600,27 @@ function connect() {
     if (o.k === 'status') { if (o.mode) relayMode = o.mode; setAis(o.state, o.detail); return; }
     if (o.k === 'hb') { relayMode = o.mode || relayMode; collectorOk = o.col !== false; return; }
     if (o.k === 'pong') return;
-    if (o.k === 'snap') { for (const v of o.v || []) { upsert({ ...v, k: 'p' }, rx); upsert({ ...v, k: 'snap' }, rx); } lastMsg = rx; markLive(); return; }
+    if (o.k === 'snap') { for (const v of o.v || []) { upsert({ ...v, k: 'p' }, rx); upsert({ ...v, k: 'snap' }, rx); } if (o.now) maxSrvTs = o.now; lastMsg = rx; markLive(); return; }
     if (o.k === 'p' || o.k === 's') { upsert(o, rx); lastMsg = rx; markLive(); }
   };
   sock.onclose = (ev) => {
     if (ws !== sock) return;
-    ws = null; clearInterval(pingTimer);
+    ws = null; clearInterval(pingTimer); clearTimeout(rotTimer);
     if (!lostAt) lostAt = Date.now();
     if (ev.code === 4001) setAis('rejected', aisState.detail);
     else if (!['nokey', 'rejected'].includes(aisState.state)) setAis(navigator.onLine === false ? 'offline' : 'reconnect');
-    if (Date.now() - connectedAt > 60000) wsRetry = 0; // lief stabil (z. B. Server-Zeitlimit) → sofort neu
+    if (opened && Date.now() - connectedAt > 60000) wsRetry = 0; // lief stabil (z. B. Server-Zeitlimit) → sofort neu
     retry();
   };
   sock.onerror = () => {};
+}
+function rotate() { // neue Verbindung aufbauen, alte erst schließen, wenn die neue Daten liefert
+  if (!ws || ws.readyState !== 1 || document.hidden || relayMode !== 'cache') return; // Direktmodus: kein 2. aisstream-Platz
+  const old = ws; old.onclose = null; ws = null; clearInterval(pingTimer);
+  connect();
+  const nw = ws, kill = () => { try { old.close(); } catch (_) {} };
+  if (!nw) { kill(); return; }
+  nw.addEventListener('message', () => setTimeout(kill, 500), { once: true }); setTimeout(kill, 12000);
 }
 function markLive() { if (aisState.state !== 'live') setAis('live'); }
 function retry() {
@@ -614,15 +630,21 @@ function retry() {
   retryTimer = setTimeout(connect, base * (0.8 + Math.random() * 0.4) + 250);
   wsRetry = Math.min(Math.max(1000, wsRetry * 1.8), 15000);
 }
-function disconnect() { clearTimeout(retryTimer); clearInterval(pingTimer); if (ws) { const w = ws; ws = null; w.onclose = null; try { w.close(); } catch (_) {} } }
+function disconnect() { clearTimeout(retryTimer); clearInterval(pingTimer); clearTimeout(rotTimer); if (ws) { const w = ws; ws = null; w.onclose = null; try { w.close(); } catch (_) {} } }
 function forceReconnect() { disconnect(); if (!lostAt) lostAt = Date.now(); setAis('reconnect'); wsRetry = 0; connect(); }
 function setAis(state, detail = '') {
+  if (aisState.state === 'live' && (state === 'relay' || state === 'connecting') && Date.now() - lastRx < 25000) return;
+  if (state === 'outside') { aisState = { state, detail }; return; }
   if (state === 'live') { wsRetry = 0; lostAt = 0; if (!linkSince) linkSince = Date.now(); }
   else if (state !== 'connecting') linkSince = 0;
   aisState = { state, detail };
 }
 // Wache: halb offene Verbindungen (Funkloch, WLAN↔LTE, iPad gesperrt) erkennen und neu aufbauen
-setInterval(() => { if (!S.demo && !document.hidden && ws && ws.readyState === 1 && Date.now() - lastRx > 25000) forceReconnect(); }, 4000);
+setInterval(() => {
+  if (S.demo || document.hidden || !ws) return;
+  if (ws.readyState === 1 && Date.now() - lastRx > 25000) forceReconnect();
+  else if (ws.readyState === 0 && Date.now() - sockStart > 15000) forceReconnect(); // Aufbau hängt (Funkloch)
+}, 4000);
 addEventListener('online', () => { wsRetry = 0; if (ws && Date.now() - lastRx > 10000) forceReconnect(); else connect(); });
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) { clearTimeout(hideTimer); hideTimer = setTimeout(disconnect, 120000); }
@@ -696,6 +718,7 @@ function renderStrip() {
   else if (st === 'nokey') { cls = 'bad'; txt = 'AIS-Schlüssel ungültig'; }
   else if (st === 'rejected') { cls = 'bad'; txt = `AIS belegt · ${n} gehalten`; }
   else if (st === 'offline') { cls = 'bad'; txt = n ? `Kein Internet · ${n} gehalten` : 'Kein Internet'; }
+  else if (st === 'outside') { cls = 'wait'; txt = 'AIS: außerhalb des Gebiets'; }
   else if (linkOk() && !collectorOk) { cls = 'wait'; txt = `AIS-Quelle gestört · ${n}`; }
   else if (linkOk()) { cls = 'ok'; txt = `AIS live · ${n}`; }
   else if (n && lostAt) { cls = 'wait'; txt = `AIS unterbrochen · ${n} gehalten`; }
@@ -765,7 +788,7 @@ function renderNear() {
   const el = $('#near'), t = dangers[0] || nearest;
   if (!t || !own || measuring || S.mob) { el.hidden = true; return; }
   const dg = !!t.dg, C = CATCOL[theme], ps = passSide(t);
-  const sub = dg ? `CPA ${nmTxt(t.cpa)} in ${Math.max(1, Math.round(t.tcpa / 60))} min` : t.tcpa > 0 && t.tcpa < 3600 && (t.s >= 0.5 || own.sog >= 0.5) ? `${ps || 'CPA'} ${nmTxt(t.cpa)} · ${Math.max(1, Math.round(t.tcpa / 60))} min` : `${p3(t.brg)}° · ${relSide(own, t.brg) || 'entfernt sich'}`;
+  const sub = t.sart ? `Peilung ${p3(t.brg)}°` : dg ? `CPA ${nmTxt(t.cpa)} in ${Math.max(1, Math.round(t.tcpa / 60))} min` : t.tcpa > 0 && t.tcpa < 3600 && (t.s >= 0.5 || own.sog >= 0.5) ? `${ps || 'CPA'} ${nmTxt(t.cpa)} · ${Math.max(1, Math.round(t.tcpa / 60))} min` : `${p3(t.brg)}° · ${relSide(own, t.brg) || 'entfernt sich'}`;
   el.className = dg ? 'danger' : '';
   el.innerHTML = `<span class="ico">${triSvg(C[cat(t.ty)], dg)}</span><span class="cap">${t.sart ? 'Notfall-Sender' : dg ? 'Annäherung' : 'Nächstes Schiff'}</span>
     <span class="fig">${nmTxt(t.dist)}<small>${sub}</small></span><b>${esc(t.n || t.m)}</b>`;
@@ -818,42 +841,47 @@ function nearGauges(p, n = 3) {
 async function loadTides(force) {
   const p = own || lastOwn || { lat: map.getCenter().lat, lon: map.getCenter().lng };
   if (!GAUGES.length || tideBusy) return;
-  if (!force && TIDE.at && Date.now() - TIDE.t < 110000 && distM(TIDE.at, p) < 8000) return;
-  const ids = nearGauges(p, 3).map((g) => g.id);
+  const vc0 = { lat: map.getCenter().lat, lon: map.getCenter().lng };
+  if (!force && TIDE.at && Date.now() - TIDE.t < 110000 && distM(TIDE.at, p) < 8000 && TIDE.vc && distM(TIDE.vc, vc0) < 10000) return;
+  const vc = { lat: map.getCenter().lat, lon: map.getCenter().lng };
+  const ids = [...new Set([...nearGauges(p, 3), ...nearGauges(vc, 3)].map((g) => g.id))].slice(0, 6);
   const nearNok = p.lat > 53.8 && p.lat < 54.5 && p.lon > 9.0 && p.lon < 10.3;
   if (!ids.length && !nearNok) { TIDE = { gauges: [], nok: [], t: Date.now(), at: p }; return; }
   tideBusy = true;
   try {
     const r = await fetch(`${TIDES_URL}?ids=${ids.join(',')}${nearNok ? '&nok=1' : ''}`);
     const d = await r.json();
-    TIDE = { gauges: (d.gauges || []).filter((g) => !g.error), nok: d.nok || [], t: Date.now(), at: p, srvT: d.t };
+    TIDE = { gauges: (d.gauges || []).filter((g) => !g.error), nok: d.nok || [], t: Date.now(), at: p, vc: vc0, srvT: d.t };
     store('sk_tide', TIDE);
-    renderSoundings(); if (drawer === 'tide') renderTide(true);
+    renderSoundings();
+    if (drawer === 'tide' && !(document.activeElement && /INPUT/.test(document.activeElement.tagName) && dBody.contains(document.activeElement)) && Date.now() - drawerTouch > 1500) renderTide(true);
   } catch (_) { if (!TIDE.gauges.length) { const c = load('sk_tide', null); if (c) TIDE = { ...c, stale: true }; } }
   finally { tideBusy = false; }
 }
 setInterval(() => loadTides(), 30000);
-function predAt(g, t) { // cm über SKN aus HW/NW-Vorausberechnung
+function predAt(g, t) { // cm über SKN: amtliche BSH-Tidenkurve (10 min), sonst Näherung zwischen HW und NW
+  const c = g.curve;
+  if (c && c.h && c.h.length > 1) { const i = (t - c.t0) / c.step, k = Math.floor(i); if (k >= 0 && k + 1 < c.h.length) return c.h[k] + (c.h[k + 1] - c.h[k]) * (i - k); }
   const ev = g.ev || [];
   for (let i = 1; i < ev.length; i++) if (ev[i].t >= t && ev[i - 1].t <= t) {
-    const a = ev[i - 1], b = ev[i], x = (t - a.t) / (b.t - a.t);
-    return a.h + (b.h - a.h) * (1 - Math.cos(Math.PI * x)) / 2;
+    const a = ev[i - 1], b = ev[i]; if (a.ty === b.ty) return null;
+    return a.h + (b.h - a.h) * (1 - Math.cos(Math.PI * (t - a.t) / (b.t - a.t))) / 2;
   }
   return null;
 }
-function levelOf(g, t = Date.now()) { // aktueller Stand: gemessen, sonst Vorhersage + zuletzt gemessener Windstau
+function levelOf(g, t = Date.now()) { // aktueller Stand: Messung (fortgeschrieben mit der Vorhersage-Steigung), sonst Vorhersage
   const pr = predAt(g, t), m = g.now || {};
   if (m.meas != null && m.measT && t - m.measT < 20 * 60e3) {
-    const drift = (t - m.measT) * 0; // Messung ist minutenaktuell; Änderung bis jetzt über Vorhersage-Steigung
-    const dp = pr != null && predAt(g, m.measT) != null ? pr - predAt(g, m.measT) : 0;
-    return { h: m.meas + dp + drift, src: 'gemessen', surge: m.surge };
+    const pm = predAt(g, m.measT);
+    return { h: m.meas + (pr != null && pm != null ? pr - pm : 0), src: 'gemessen', surge: m.surge };
   }
-  if (pr != null) return { h: pr + (m.surge != null && m.measT && t - m.measT < 3 * 3600e3 ? m.surge : 0), src: 'vorhergesagt', surge: m.surge };
+  if (pr != null) return { h: pr + (m.surge != null && m.measT && t - m.measT < 60 * 60e3 ? m.surge : 0), src: 'vorhergesagt', surge: m.surge };
   return null;
 }
 function tideAt(p) { // Wasserstand über SKN (m) am Ort: Abstandsgewichtung der zwei nächsten Pegel
   if (nokKm(p) != null) return null; // Kanal: geregelter Wasserstand, keine Tide
-  const list = TIDE.gauges.map((g) => ({ g, d: Math.max(500, distM(p, g)), l: levelOf(g) })).filter((x) => x.l && x.d < 70000).sort((a, b) => a.d - b.d).slice(0, 2);
+  // nur Pegel im Umkreis von 25 km – weiter weg weicht die Tide zu stark ab (dann lieber kein Punkt)
+  const list = TIDE.gauges.map((g) => ({ g, d: Math.max(500, distM(p, g)), l: levelOf(g) })).filter((x) => x.l && x.d < 25000).sort((a, b) => a.d - b.d).slice(0, 2);
   if (!list.length) return null;
   let sw = 0, sh = 0; for (const x of list) { const w = 1 / (x.d * x.d); sw += w; sh += w * x.l.h; }
   return { h: sh / sw / 100, src: list[0].l.src, g: list[0].g, d: list[0].d, surge: list[0].l.surge };
@@ -867,7 +895,8 @@ const mTxt = (cm, sign) => cm == null ? '–' : `${sign && cm > 0 ? '+' : ''}${d
 const TILE = 1 / 16, CELL = 1 / 960, depthTiles = new Map(), waterCache = new Map();
 function tileKey(i, j) { return `${i}:${j}`; }
 function loadDepthTile(i, j) {
-  const k = tileKey(i, j); if (depthTiles.has(k)) return depthTiles.get(k);
+  const k = tileKey(i, j), old = depthTiles.get(k);
+  if (old && !(old.failed && Date.now() - old.failed > 60000)) return old;
   const s = i * TILE, w = j * TILE, rec = { ok: false, p: null };
   rec.p = fetch(`${EMOD_WCS}&subset=Lat(${(s + CELL / 4).toFixed(5)},${(s + TILE - CELL / 4).toFixed(5)})&subset=Long(${(w + CELL / 4).toFixed(5)},${(w + TILE - CELL / 4).toFixed(5)})`)
     .then((r) => r.ok ? r.text() : Promise.reject(r.status)).then((txt) => {
@@ -876,7 +905,7 @@ function loadDepthTile(i, j) {
       const vals = txt.split('Band 0:')[1].trim().split(/\s+/).map(Number), cols = Math.round(TILE / dx);
       Object.assign(rec, { ok: true, x0, dx, y0, dy, cols, rows: Math.round(vals.length / cols), v: vals });
       renderSoundings();
-    }).catch(() => { depthTiles.delete(k); });
+    }).catch(() => { rec.failed = Date.now(); });
   depthTiles.set(k, rec);
   if (depthTiles.size > 400) depthTiles.delete(depthTiles.keys().next().value);
   return rec;
@@ -897,24 +926,31 @@ function paintSoundings() {
   const i0 = Math.floor(b.getSouth() / TILE), i1 = Math.floor(b.getNorth() / TILE), j0 = Math.floor(b.getWest() / TILE), j1 = Math.floor(b.getEast() / TILE);
   if ((i1 - i0 + 1) * (j1 - j0 + 1) > 40) { src.setData(FC()); return; }
   const f = [], cvs = map.getCanvas(), W = cvs.clientWidth, H = cvs.clientHeight;
-  const tideCache = new Map();
-  for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) {
+  const tideCache = new Map(), tilesReady = map.areTilesLoaded();
+  scan: for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) {
     const t = loadDepthTile(i, j); if (!t.ok) continue;
     for (let r = 0; r < t.rows; r++) {
-      const lat = t.y0 + r * t.dy, gr = Math.round(lat / CELL); if (gr % stride) continue;
+      const gr = i * t.rows + (t.rows - 1 - r); if (gr % stride) continue; // Zeile 0 = Norden
+      const lat = t.y0 + r * t.dy;
       for (let q = 0; q < t.cols; q++) {
-        const lon = t.x0 + q * t.dx, gc = Math.round(lon / CELL); if (gc % stride) continue;
+        const gc = j * t.cols + q; if (gc % stride) continue;
+        const lon = t.x0 + q * t.dx;
         const v = t.v[r * t.cols + q]; if (!isFinite(v) || v > 3) continue;
         const pt = map.project([lon, lat]); if (pt.x < 14 || pt.y < 80 || pt.x > W - 90 || pt.y > H - 14) continue;
-        const wk = gr * 100000 + gc; let wet = waterCache.get(wk);
-        if (wet === undefined) { wet = map.queryRenderedFeatures(pt, { layers: ['water'] }).length > 0; waterCache.set(wk, wet); } // nur im Wasser (Deiche/Marsch ausschließen)
+        const wk = gr * 1000000 + gc; let wet = waterCache.get(wk);
+        if (wet === undefined) { // nur im Wasser (Deiche/Marsch ausschließen); „trocken“ erst merken, wenn die Kartenkacheln geladen sind
+          wet = map.queryRenderedFeatures(pt, { layers: ['water'] }).length > 0;
+          if (wet || tilesReady) waterCache.set(wk, wet);
+        }
         if (!wet) continue;
         const tk = `${Math.round(lat * 20)}:${Math.round(lon * 20)}`; // Tide je ~3-km-Feld einmal rechnen
-        if (!tideCache.has(tk)) tideCache.set(tk, tideAt({ lat, lon }));
-        const td = tideCache.get(tk), h = td ? td.h : 0, d = h - v;
+        if (!tideCache.has(tk)) tideCache.set(tk, nokKm({ lat, lon }) != null ? 'nok' : tideAt({ lat, lon }));
+        const td = tideCache.get(tk);
+        if (!td || td === 'nok') continue; // im Kanal keine Daten; ohne nahen Pegel keine (falschen) Zahlen
+        const d = td.h - v;
         if (d < 0.1) continue;
-        f.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [lon, lat] }, properties: { t: d < 10 ? de(d, 1) : String(Math.round(d)), c: sndClass(d), lat: td ? 1 : 0 } });
-        if (f.length > 900) break;
+        f.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [lon, lat] }, properties: { t: d < 10 ? de(d, 1) : String(Math.round(d)), c: sndClass(d) } });
+        if (f.length >= 900) break scan;
       }
     }
   }
@@ -974,9 +1010,9 @@ function renderTide(full) {
     const L = levelOf(g), nx = nextEvents(g, 4), ago = g.now?.measT ? fmtAge(Date.now() - g.now.measT) : null;
     html += `<div class="sub">Pegel <b>${esc(g.name)}</b> · ${nmTxt(distM(p, g))} entfernt</div>
       <div class="hero"><div><span class="cap">Jetzt ü. SKN</span><b>${L ? de(L.h / 100, 2) : '–'}<i>m</i></b></div>
-        <div><span class="cap">Vorhersage BSH</span><b>${g.now?.pred != null ? de(predAt(g, Date.now()) / 100, 2) : '–'}<i>m</i></b></div>
+        <div><span class="cap">Vorhersage BSH</span><b>${predAt(g, Date.now()) != null ? de(predAt(g, Date.now()) / 100, 2) : '–'}<i>m</i></b></div>
         <div class="${Math.abs(g.now?.surge || 0) >= 50 ? 'dg' : ''}"><span class="cap">Windstau</span><b>${g.now?.surge != null ? mTxt(g.now.surge, true).replace(' m', '<i>m</i>') : '–'}</b></div></div>
-      <p class="note">${L?.src === 'gemessen' ? `Gemessen am Pegel vor ${ago} (PEGELONLINE).` : 'Keine aktuelle Messung – Wert aus der Vorausberechnung.'} Windstau = Messung minus astronomische Vorhersage.</p>
+      <p class="note">${L?.src === 'gemessen' ? `Gemessen am Pegel vor ${ago} (PEGELONLINE).` : 'Keine aktuelle Messung – Wert aus der amtlichen Vorausberechnung.'} Windstau = Messung minus Vorhersage (BSH-Tidenkurve). Positiv = mehr Wasser als vorhergesagt.</p>
       ${tideCurveSvg(g)}
       <div class="group cap">Tidenkalender (BSH-Vorausberechnung)</div>
       <dl class="kv">${nx.map((e) => `<dt>${e.ty === 'HW' ? 'Hochwasser' : 'Niedrigwasser'} · ${new Date(e.t).toLocaleDateString('de-DE', { weekday: 'short' })}</dt><dd>${hm(e.t)} ${tz()} · ${de(e.h / 100, 2)} m</dd>`).join('')}</dl>
@@ -1116,6 +1152,7 @@ function aisStatusHtml() {
   if (st === 'demo') txt = '<b class="warn">Demo aktiv</b> – die Schiffe sind erfunden.';
   else if (st === 'nokey') txt = '<b class="bad">AIS-Schlüssel ungültig.</b> Bitte beim Einrichter melden.';
   else if (st === 'rejected') txt = '<b class="bad">AIS-Zugang belegt</b> (außerhalb des Sammelgebiets nur 3 gleichzeitige Verbindungen). Neuer Versuch automatisch.';
+  else if (st === 'outside') txt = '<b class="warn">Außerhalb des AIS-Sammelgebiets</b> (Deutsche Bucht, Elbe, Nord-Ostsee-Kanal, Kieler Bucht). Karte zurück in dieses Gebiet schieben.';
   else if (st === 'offline') txt = `<b class="bad">Kein Internet.</b> ${n} Schiffe bleiben auf ihren letzten Positionen, bis die Verbindung zurück ist.`;
   else if (linkOk()) txt = `<b class="ok">Verbunden</b> · ${n} Schiffe · ${relayMode === 'cache' ? 'Sammeldienst Elbe/NOK/Kieler Bucht' + (collectorOk ? '' : ' <b class="warn">(Quelle gestört)</b>') : 'direkte AIS-Verbindung'}`;
   else if (lostAt) txt = `<b class="warn">Verbindung unterbrochen</b> seit ${fmtAge(Date.now() - lostAt)} – baut sich automatisch neu auf. ${n} Schiffe werden solange gehalten.`;
@@ -1399,6 +1436,7 @@ async function wake() {
 }
 navigator.storage?.persist?.().catch(() => {}); // Einstellungen/MMSI nicht vom System wegräumen lassen
 if ('serviceWorker' in navigator) {
+  const hadCtrl = !!navigator.serviceWorker.controller; // beim allerersten Besuch nicht neu laden (Assistent bliebe sonst hängen)
   navigator.serviceWorker.register('sw.js').then((reg) => {
     const offer = (w) => toast('Neue Version verfügbar – tippen zum Aktualisieren', () => { w.postMessage('skip'); });
     if (reg.waiting && navigator.serviceWorker.controller) offer(reg.waiting);
@@ -1407,7 +1445,7 @@ if ('serviceWorker' in navigator) {
     document.addEventListener('visibilitychange', () => { if (!document.hidden) reg.update().catch(() => {}); });
   }).catch(() => {});
   let reloaded = false;
-  navigator.serviceWorker.addEventListener('controllerchange', () => { if (!reloaded) { reloaded = true; location.reload(); } });
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadCtrl && !reloaded) { reloaded = true; location.reload(); } });
 }
 
 /* ================= Start ================= */
