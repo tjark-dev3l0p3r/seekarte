@@ -2,7 +2,7 @@
    Eigene Position: Tablet-GPS, eigenes AIS (MMSI) oder gewichtetes Mittel aus beidem. */
 'use strict';
 
-const VERSION = '2.3.0';
+const VERSION = '2.3.1';
 const RELAY_URL = 'wss://twybfsbfbxvwwxbdphum.supabase.co/functions/v1/ais-relay';
 const NM = 1852, KN = 1852 / 3600;
 const STALE_MS = 6 * 60e3, DROP_MS = 20 * 60e3;
@@ -1018,20 +1018,36 @@ function paintSoundings() {
 }
 
 /* ---- Anzeige ---- */
-function renderTideStrip() {
+function depthAt(p) { // Kartentiefe (m unter SKN, positiv = Wasser) an einem Punkt, nächste EMODnet-Zelle
+  const t = loadDepthTile(Math.floor(p.lat / TILE), Math.floor(p.lon / TILE)); if (!t.ok) return null;
+  const r = Math.max(0, Math.min(t.rows - 1, Math.round((p.lat - t.y0) / t.dy))), q = Math.max(0, Math.min(t.cols - 1, Math.round((p.lon - t.x0) / t.dx)));
+  const v = t.v[r * t.cols + q];
+  return isFinite(v) && v <= 3 ? -v : null;
+}
+function renderTideStrip() { // Leiste: Wassertiefe jetzt an der eigenen Position (Kartentiefe + Tide)
   const el = $('#iTide'), p = own || lastOwn || null;
   if (!p || !S.tideStrip) { el.hidden = true; return; }
+  el.classList.remove('shoal', 'warn');
   const km = nokKm(p);
-  if (km != null && TIDE.nok.length) { // im Kanal: Kanalpegel statt Tide
-    const n = TIDE.nok.slice().sort((a, b) => Math.abs(a.km - km) - Math.abs(b.km - km))[0];
-    $('#tideCap').textContent = `Kanal · ${n.name}`; $('#vTide').textContent = `${n.nhn >= 0 ? '+' : ''}${de(n.nhn / 100, 2)}`; $('#vTideU').textContent = 'm NHN'; $('#vTideSub').textContent = '';
+  if (km != null) { // im Kanal: keine Tiefendaten → Solltiefe + Kanalpegel
+    const n = TIDE.nok.length ? TIDE.nok.slice().sort((a, b) => Math.abs(a.km - km) - Math.abs(b.km - km))[0] : null;
+    $('#tideCap').textContent = 'Wassertiefe · Kanal'; $('#vTide').textContent = '≈ 11'; $('#vTideU').textContent = 'm';
+    $('#vTideSub').textContent = n ? `Solltiefe · Pegel ${n.nhn >= 0 ? '+' : ''}${de(n.nhn / 100, 2)} m` : 'Solltiefe Fahrrinne';
     el.hidden = false; return;
   }
-  const t = tideAt(p); if (!t) { el.hidden = true; return; }
-  const tr = trendOf(t.g), nx = nextEvents(t.g, 1)[0];
-  $('#tideCap').textContent = `Tide · ${t.src === 'gemessen' ? 'gemessen' : 'Vorhersage'}`;
-  $('#vTide').textContent = de(t.h, 1); $('#vTideU').textContent = `m ${tr > 1 ? '↗' : tr < -1 ? '↘' : '→'}`;
-  $('#vTideSub').textContent = nx ? `${nx.ty} ${hm(nx.t)}` : '';
+  const chart = depthAt(p), t = tideAt(p);
+  if (chart == null) { el.hidden = true; return; }
+  const d = chart + (t ? t.h : 0), tr = t ? trendOf(t.g) : 0, arrow = tr > 1 ? '↗' : tr < -1 ? '↘' : '→';
+  $('#tideCap').textContent = t ? 'Wassertiefe · jetzt' : 'Kartentiefe (ohne Tide)';
+  $('#vTide').textContent = d < 0.1 ? 'trocken' : de(d, 1); $('#vTideU').textContent = d < 0.1 ? '' : 'm';
+  if (S.draught > 0) {
+    const ukc = d - S.draught;
+    $('#vTideSub').textContent = `unterm Kiel ${de(ukc, 1)} m · Tide ${arrow}`;
+    el.classList.add(ukc < S.ukc ? 'shoal' : ukc < S.ukc + 1 ? 'warn' : 'ok');
+  } else {
+    const nx = t ? nextEvents(t.g, 1)[0] : null;
+    $('#vTideSub').textContent = t ? `Tide ${t.h >= 0 ? '+' : ''}${de(t.h, 1)} m ${arrow}${nx ? ' · ' + nx.ty + ' ' + hm(nx.t) : ''}` : 'kein Pegel in der Nähe';
+  }
   el.hidden = false;
 }
 function tideCurveSvg(g) {
@@ -1080,7 +1096,7 @@ function renderTide(full) {
   if (full) {
     html += `<div class="group cap">Tiefenpunkte auf der Karte</div>
       ${tog('iDepthPts', S.depthPts, 'Aktuelle Wassertiefe anzeigen', 'Kleine Punkte mit der Tiefe jetzt (Kartentiefe + Tide), ab mittlerer Zoomstufe')}
-      ${tog('iTideStrip', S.tideStrip, 'Tide oben in der Leiste')}
+      ${tog('iTideStrip', S.tideStrip, 'Wassertiefe oben in der Leiste', 'Tiefe jetzt an deiner Position (Kartentiefe + Tide)')}
       <div class="row"><div class="lbl"><b>Tiefgang eigenes Schiff</b><small>0 = keine Einfärbung nach Tiefgang</small></div><input class="field" id="iDraught" inputmode="decimal" value="${de(S.draught, 1)}"><span class="unit">m</span></div>
       <div class="row"><div class="lbl"><b>Sicherheitsabstand unterm Kiel</b></div><input class="field" id="iUkc" inputmode="decimal" value="${de(S.ukc, 1)}"><span class="unit">m</span></div>
       <div class="legend snd"><div><i class="dot shoal"></i>zu flach${S.draught > 0 ? ` (unter ${de(S.draught + S.ukc, 1)} m)` : ' (unter 2 m)'}</div><div><i class="dot warn"></i>knapp${S.draught > 0 ? ` (+1 m)` : ' (2–5 m)'}</div><div><i class="dot safe"></i>ausreichend</div></div>
@@ -1380,7 +1396,7 @@ function help() {
     <p>Die kleinen <b>Punkte mit Zahlen</b> im Wasser zeigen die <b>Wassertiefe jetzt</b>: Kartentiefe (bezogen auf Seekartennull) plus der aktuelle Wasserstand am nächsten Pegel.
     Der Wasserstand kommt live vom Pegel (inklusive Windstau); fehlt eine Messung, nimmt die Karte die amtliche Gezeitenvorausberechnung des BSH.
     <b>Rot</b> = zu flach, <b>orange</b> = knapp, <b>blau</b> = ausreichend – nach deinem Tiefgang, den du unter <b>Gezeiten</b> einträgst.</p>
-    <p>Oben in der Leiste steht die <b>Tide</b>: Höhe über Seekartennull, Pfeil steigend/fallend und das nächste Hoch- oder Niedrigwasser. Antippen öffnet Tidenkurve und Tidenkalender. Im Nord-Ostsee-Kanal steht dort der Kanalpegel.</p>
+    <p>Oben in der Leiste steht die <b>Wassertiefe jetzt</b> an deiner Position (Kartentiefe plus aktuelle Tide), darunter die Tide mit Pfeil steigend/fallend und das nächste Hoch- oder Niedrigwasser – oder, wenn du deinen Tiefgang einträgst, das <b>Wasser unterm Kiel</b> (rot, wenn es knapp wird). Antippen öffnet Tidenkurve und Tidenkalender. Im Nord-Ostsee-Kanal steht dort die Solltiefe mit dem Kanalpegel.</p>
     <p class="note">Die Kartentiefen sind ein Raster von etwa 115 m – gebaggerte Fahrrinnen und Sände können abweichen. Amtliche Seekarte und Echolot gehen vor.</p>
     <h3>Wenn das AIS kurz weg ist</h3>
     <p>Bricht die Internetverbindung ab, bleiben alle Schiffe auf ihren letzten Positionen stehen (oben steht dann „AIS unterbrochen · … gehalten“). Sie werden mit der Zeit blasser. Sobald die Verbindung zurück ist, kommen sofort alle aktuellen Positionen – du musst nichts tun.</p>
