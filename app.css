@@ -308,3 +308,16 @@ details.expert[open] summary::before{content:"▾ ";}
 /* Alarm mittig im freien Kartenbereich, nie unter der Werkzeugleiste */
 #alert{left:calc(var(--lft) + 16px);right:calc(var(--rgt) + var(--rail) + 40px);transform:none;margin-inline:auto;width:fit-content;max-width:none}
 @media (min-width:900px){ body.dopen #alert{left:calc(var(--lft) + 460px);max-width:none} }
+
+/* Mein Schiff */
+.btn.myship{width:100%;margin-top:12px;min-height:54px;border:2px solid var(--own);color:var(--own);font-size:16px;background:transparent}
+.btn.myship svg{width:22px;height:22px}
+.myship.on{display:grid;grid-template-columns:28px 1fr;gap:6px 12px;align-items:center;margin-top:14px;padding:12px 14px;border-radius:14px;border:2px solid var(--own);background:color-mix(in srgb,var(--own) 8%,transparent)}
+.myship.on svg{width:24px;height:24px;color:var(--own)}
+.myship.on small{display:block;color:var(--ink-2);font-size:13px;margin-top:2px}
+.myship.on .btn{grid-column:1 / -1}
+#suggest{display:grid;gap:4px;padding:12px 16px;border-radius:var(--r);background:color-mix(in srgb,var(--panel) 96%,transparent);border:2px solid var(--own);box-shadow:var(--shadow);max-width:380px}
+#suggest .cap{color:var(--own)}
+#suggest b{font-size:18px}
+#suggest .row2{display:flex;gap:8px;margin-top:6px}
+.tag{font-style:normal;font-size:11px;font-weight:700;color:var(--own);border:1.5px solid var(--own);border-radius:6px;padding:0 5px;margin-left:6px;vertical-align:2px}
