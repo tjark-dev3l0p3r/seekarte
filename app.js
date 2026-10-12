@@ -2,7 +2,7 @@
    Eigene Position: Tablet-GPS, eigenes AIS (MMSI) oder gewichtetes Mittel aus beidem. */
 'use strict';
 
-const VERSION = '2.2.0';
+const VERSION = '2.3.0';
 const RELAY_URL = 'wss://twybfsbfbxvwwxbdphum.supabase.co/functions/v1/ais-relay';
 const NM = 1852, KN = 1852 / 3600;
 const STALE_MS = 6 * 60e3, DROP_MS = 20 * 60e3;
@@ -12,7 +12,7 @@ const $ = (s) => document.querySelector(s);
 const DEFAULTS = {
   mmsi: '', source: 'fused', key: '', vecMin: 6, cpaNm: 0.5, tcpaMin: 15, alarm: true, sound: true,
   theme: 'day', orient: 'north', seamarks: true, depth: false, sat: false, rings: true, labels: true, track: true,
-  showB: true, showMoored: true, demo: false, wake: true, onboarded: false, units: 'sea', profile: 'sea', mob: null, depthPts: true, tideStrip: true, draught: 0, ukc: 0.5,
+  showB: true, showMoored: true, demo: false, wake: true, onboarded: false, units: 'sea', profile: 'sea', mob: null, notMine: [], depthPts: true, tideStrip: true, draught: 0, ukc: 0.5,
 };
 // Warn-Profile: Abstand (sm) / Vorwarnzeit (min) – im Kanal passieren sich Schiffe planmäßig auf ~50–100 m
 const PROFILES = { sea: { cpa: 0.5, tcpa: 15, t: 'See' }, river: { cpa: 0.2, tcpa: 10, t: 'Revier / Elbe' }, canal: { cpa: 0.03, tcpa: 4, t: 'Kanal' } };
@@ -205,6 +205,8 @@ function iconSet(th) {
     g.fillStyle = P.own; g.fill(); g.lineWidth = 2.4; g.strokeStyle = P.ownHalo; g.lineJoin = 'round'; g.stroke();
     g.beginPath(); g.arc(0, 2, 2.6, 0, 7); g.fillStyle = P.ownHalo; g.fill();
   });
+  out.mine = canvasImg(40, 40, (g) => { tri(g, 13); g.fillStyle = P.ownHalo; g.fill(); g.lineWidth = 3; g.strokeStyle = P.own; g.lineJoin = 'round'; g.stroke(); });
+  out.minec = canvasImg(40, 40, (g) => { g.beginPath(); g.arc(0, 0, 7, 0, 7); g.fillStyle = P.ownHalo; g.fill(); g.lineWidth = 3; g.strokeStyle = P.own; g.stroke(); });
   out.ownc = canvasImg(36, 36, (g) => {
     g.beginPath(); g.arc(0, 0, 9, 0, 7); g.fillStyle = P.own; g.fill(); g.lineWidth = 2.4; g.strokeStyle = P.ownHalo; g.stroke();
     g.beginPath(); g.arc(0, 0, 2.6, 0, 7); g.fillStyle = P.ownHalo; g.fill();
@@ -298,7 +300,7 @@ function applyLayers() {
 /* ================= Zustand ================= */
 const ships = new Map();
 const statics = load('sk_static', {});
-let gps = null, gpsHist = [], gpsErr = '', own = null, lastOwn = load('sk_lastown', null), follow = true, selected = null;
+let gpsCoarse = null, onBoard = null, farSince = 0, boardDist = null, suggest = null, gps = null, gpsHist = [], gpsErr = '', own = null, lastOwn = load('sk_lastown', null), follow = true, selected = null;
 let aisState = { state: 'off', detail: '' }, lastMsg = 0, overlayReady = false;
 let measuring = false, measurePts = [], ownTrack = [], dangers = [], nearest = null, probePt = null;
 
@@ -307,7 +309,7 @@ function startGps() {
   if (!('geolocation' in navigator)) { gpsErr = 'Gerät ohne Standortdienst'; return; }
   navigator.geolocation.watchPosition((p) => {
     const c = p.coords, now = Date.now();
-    if (c.accuracy > 500) { gpsErr = 'nur grobe WLAN-Ortung'; return; }
+    if (c.accuracy > 500) { gpsErr = 'nur grobe WLAN-Ortung'; if (c.accuracy < 20000) gpsCoarse = { lat: c.latitude, lon: c.longitude, acc: c.accuracy, t: now }; return; }
     gps = { lat: c.latitude, lon: c.longitude, acc: c.accuracy || 30, t: now,
       sog: c.speed != null && c.speed >= 0 ? c.speed / KN : null, cog: c.heading != null && !isNaN(c.heading) && c.speed > 0.3 ? c.heading : null };
     gpsHist.push({ lat: gps.lat, lon: gps.lon, t: now }); if (gpsHist.length > 60) gpsHist.shift();
@@ -329,12 +331,16 @@ function fuse() {
     cands.push({ k: 'GPS', lat: gps.lat, lon: gps.lon, sig: Math.max(gps.acc, 3) + (now - gps.t) / 1000 * (moving ? 5 : 0.3), sog, cog: gps.cog ?? m.cog ?? null, hdg: null, age: now - gps.t });
   }
   const oa = S.mmsi ? ships.get(+S.mmsi) : null;
-  if (S.source !== 'gps' && oa && oa.la != null) {
+  let oaPos = null;
+  if (oa && oa.la != null && now - oa.ts < 600000) {
     const age = (now - oa.ts) / 1000;
-    if (age < 600) {
-      const p = oa.s > 0.3 && oa.c != null ? move({ lat: oa.la, lon: oa.lo }, oa.c, oa.s * KN * Math.min(age, 120)) : { lat: oa.la, lon: oa.lo };
-      cands.push({ k: 'AIS', ...p, sig: 10 + (oa.s > 0.5 ? 1.2 : 0.05) * age, sog: oa.s ?? null, cog: oa.c ?? null, hdg: oa.h ?? null, age: age * 1000 });
-    }
+    oaPos = oa.s > 0.3 && oa.c != null ? move({ lat: oa.la, lon: oa.lo }, oa.c, oa.s * KN * Math.min(age, 120)) : { lat: oa.la, lon: oa.lo };
+    oaPos.age = age;
+  }
+  checkBoard(now, oa, oaPos);
+  if (S.source !== 'gps' && oaPos && onBoard !== false) {
+    const age = oaPos.age;
+    cands.push({ k: 'AIS', lat: oaPos.lat, lon: oaPos.lon, sig: 10 + (oa.s > 0.5 ? 1.2 : 0.05) * age, sog: oa.s ?? null, cog: oa.c ?? null, hdg: oa.h ?? null, age: age * 1000 });
   }
   if (S.demo && !cands.length && demoOwn) cands.push({ k: 'DEMO', ...demoOwn, sig: 6, hdg: demoOwn.cog, age: 0 });
   if (!cands.length) { own = null; return; }
@@ -353,6 +359,57 @@ function fuse() {
   p.t = now; own = p; lastOwn = { lat: p.lat, lon: p.lon };
 }
 setInterval(() => { if (lastOwn) store('sk_lastown', lastOwn); }, 30000);
+
+/* ---- Mein Schiff: an Bord oder weit weg? ----
+   Vergleicht den Standort des Tablets (GPS, notfalls grobe WLAN-Ortung) mit der AIS-Position des eigenen Schiffs.
+   Weit weg (> 1,5 km, 45 s lang) → das Schiff zählt nicht mehr als eigene Position (Tablet übernimmt) und erscheint
+   als „Mein Schiff“ auf der Karte. Wieder in der Nähe (< 400 m) → automatisch wieder verknüpft. */
+function checkBoard(now, oa, oaPos) {
+  if (!S.mmsi) { onBoard = null; farSince = 0; boardDist = null; return; }
+  const fix = gps && now - gps.t < 300000 ? gps : gpsCoarse && now - gpsCoarse.t < 1800000 ? gpsCoarse : null;
+  if (!fix || !oaPos) return; // ohne Vergleich: letzten Zustand behalten (unbekannt = an Bord)
+  const d = distM(fix, oaPos), acc = fix.acc || 30, name = (oa && oa.n) || 'deinem Schiff';
+  boardDist = d;
+  if (d < Math.max(400, 2 * acc + 100)) {
+    if (onBoard === false) toast(`Wieder an Bord von ${name} – Position kommt wieder vom Schiff`);
+    onBoard = true; farSince = 0;
+  } else if (d > Math.max(1500, 3 * acc + 500)) {
+    if (!farSince) farSince = now;
+    if (now - farSince > 45000 && onBoard !== false) { onBoard = false; toast(`Nicht an Bord von ${name} (${nmTxt(d)} entfernt) – Position kommt jetzt vom Tablet`); }
+  } else farSince = 0;
+}
+function setMyShip(m) {
+  const t = ships.get(m);
+  S.mmsi = m ? String(m) : ''; if (m && S.source === 'gps') S.source = 'fused';
+  S.notMine = (S.notMine || []).filter((x) => x !== m); save();
+  onBoard = null; farSince = 0; suggest = null; $('#suggest').hidden = true;
+  if (m) { setFollow(true); toast(`${t?.n || 'Schiff'} ist jetzt dein Schiff`); } else toast('Kein eigenes Schiff mehr festgelegt');
+  render(); renderStrip();
+}
+// Vorschlag: Fährt ein AIS-Ziel genau mit dem Tablet mit, ist es vermutlich das eigene Schiff
+function checkSuggest(now) {
+  const el = $('#suggest');
+  if (S.mmsi || !gps || now - gps.t > 60000 || gps.acc > 80) { if (!S.mmsi) suggest = suggest && now - suggest.seen < 60000 ? suggest : null; el.hidden = !suggest?.shown; return; }
+  const gm = gpsMotion(), gs = gps.sog ?? gm.sog ?? 0;
+  let best = null, bd = 1e9;
+  for (const t of ships.values()) {
+    if (!t.p || now - t.ts > 180000 || (S.notMine || []).includes(t.m)) continue;
+    const d = distM(gps, t.p); if (d > Math.max(70, 1.5 * gps.acc)) continue;
+    if (gs > 1 && Math.abs((t.s || 0) - gs) > 2) continue;
+    if (d < bd) { bd = d; best = t; }
+  }
+  if (!best) { if (suggest && now - suggest.seen > 60000) { suggest = null; el.hidden = true; } return; }
+  if (!suggest || suggest.m !== best.m) suggest = { m: best.m, since: now, seen: now, shown: false };
+  suggest.seen = now;
+  if (!suggest.shown && now - suggest.since > 40000) {
+    suggest.shown = true;
+    el.innerHTML = `<span class="cap">Bist du an Bord?</span><b>${esc(best.n || 'MMSI ' + best.m)}</b><span class="note">fährt genau mit dir mit (${Math.round(bd)} m)</span>
+      <div class="row2"><button class="btn pri" data-yes>Ja, mein Schiff</button><button class="btn" data-no>Nein</button></div>`;
+    el.hidden = false;
+    el.querySelector('[data-yes]').onclick = () => setMyShip(best.m);
+    el.querySelector('[data-no]').onclick = () => { S.notMine = [...(S.notMine || []), best.m].slice(-20); save(); suggest = null; el.hidden = true; };
+  }
+}
 
 /* ================= AIS-Ziele ================= */
 function upsert(o, rx = Date.now()) {
@@ -410,20 +467,22 @@ function render() {
   for (const [m, t] of ships) {
     if (t.la == null) continue;
     if (now - t.ts > (t.s >= 0.5 ? DROP_MS : 3 * DROP_MS) && (S.demo || (linkOk() && now - linkSince > 20000))) { ships.delete(m); continue; } // liegende 60 min, fahrende 20 min; bei Abbruch: halten
-    if (m === ownM && own) continue;
+    const mine = m === ownM;
+    if (mine && own && onBoard !== false) continue;
     const p = shipPos(t, now), stale = now - t.ts > STALE_MS; t.p = p;
     if (own) { const c = cpa(own, { lat: p.lat, lon: p.lon, s: t.s, c: t.c }); t.cpa = c.cpa; t.tcpa = c.tcpa; t.dist = distM(own, p); t.brg = brg(own, p); }
     else t.cpa = t.tcpa = t.dist = t.brg = null;
     t.sart = isSart(t) && !stale && (t.dist == null || t.dist < 12 * NM); // Notfall-Sender: Alarm im Umkreis von 12 sm
-    const dg = t.sart || (S.alarm && own && !stale && t.tcpa > 0 && t.tcpa < S.tcpaMin * 60 && t.cpa < S.cpaNm * NM && (t.s > 0.5 || own.sog > 0.5)) ? 1 : 0;
+    const likelyMe = suggest && suggest.m === m && t.dist != null && t.dist < 120; // fährt mit uns mit → keine Warnung
+    const dg = !mine && !likelyMe && (t.sart || (S.alarm && own && !stale && t.tcpa > 0 && t.tcpa < S.tcpaMin * 60 && t.cpa < S.cpaNm * NM && (t.s > 0.5 || own.sog > 0.5))) ? 1 : 0;
     t.dg = dg; if (dg) nd.push(t);
     if (!visible(t) && !dg) continue;
-    if (own && t.dist != null && (!nearest || t.dist < nearest.dist)) nearest = t;
+    if (own && !mine && !likelyMe && t.dist != null && (!nearest || t.dist < nearest.dist)) nearest = t;
     const k = cat(t.ty), moving = t.s >= 0.5;
     const shape = moving ? 'mv' : t.h != null ? 'st' : 'ci';
     pts.push({ type: 'Feature', geometry: { type: 'Point', coordinates: ll(p) }, properties: {
-      m, img: `${shape}-${k}-${dg}`, rot: t.h ?? t.c ?? 0, sz: t.b ? .8 : 1, op: stale ? .38 : 1, sel: selected === m ? 1 : 0, dg,
-      name: t.n || '', ord: dg ? 0 : selected === m ? 1 : t.b ? 3 : 2 } });
+      m, img: mine ? (moving || t.h != null ? 'mine' : 'minec') : `${shape}-${k}-${dg}`, rot: t.h ?? t.c ?? 0, sz: t.b ? .8 : 1, op: stale ? .38 : 1, sel: selected === m ? 1 : 0, dg,
+      name: mine ? `${t.n || 'Mein Schiff'} · mein Schiff` : t.n || '', ord: dg ? 0 : mine || selected === m ? 1 : t.b ? 3 : 2 } });
     if (moving && t.c != null && !stale) {
       const e = move(p, t.c, t.s * KN * S.vecMin * 60);
       lines.push({ type: 'Feature', geometry: { type: 'LineString', coordinates: [ll(p), ll(e)] }, properties: { k: 'vec', col: dg ? P.danger : P.vec, dg } });
@@ -708,7 +767,7 @@ function renderStrip() {
   $('#vLat').textContent = q ? dm(q.lat, true) : 'keine Position';
   $('#vLon').textContent = q ? dm(q.lon, false) : '';
   const src = $('#vSrc');
-  if (p) { src.textContent = p.src === 'GPS+AIS' ? 'GPS + AIS' : p.src; src.className = 'src'; }
+  if (p) { src.textContent = (p.src === 'GPS+AIS' ? 'GPS + AIS' : p.src) + (onBoard === false ? ' · nicht an Bord' : ''); src.className = 'src'; }
   else { src.textContent = S.source !== 'gps' && !S.mmsi && S.source === 'ais' ? 'MMSI fehlt' : gpsErr || 'sucht'; src.className = 'src warn'; }
   const chip = $('#cAis'), n = [...ships.values()].filter((t) => t.la != null && t.m !== +S.mmsi).length, fresh = Date.now() - lastMsg < 90000;
   const st = aisState.state;
@@ -1074,12 +1133,12 @@ function renderList(full) {
   }
   const q = listQ.trim().toUpperCase(), ownM = +S.mmsi, C = CATCOL[theme];
   const hit = (t) => !q || [t.n, t.cs, t.dst, t.imo, t.m].some((v) => v != null && String(v).toUpperCase().includes(q));
-  let arr = [...ships.values()].filter((t) => t.la != null && t.m !== ownM && hit(t));
+  let arr = [...ships.values()].filter((t) => t.la != null && (t.m !== ownM || onBoard === false) && hit(t));
   if (listF === 'moving') arr = arr.filter((t) => t.s >= 0.5); if (listF === 'danger') arr = arr.filter((t) => t.dg); if (listF === 'big') arr = arr.filter((t) => t.A + t.B >= 50);
   arr.sort((a, b) => (b.dg - a.dg) || ((a.dist ?? 1e12) - (b.dist ?? 1e12)) || (a.n || '').localeCompare(b.n || ''));
   const st = aisState.state;
   $('#ql').innerHTML = arr.length ? arr.slice(0, 300).map((t) => `<div class="vsl ${t.dg ? 'danger' : ''}" data-m="${t.m}">${triSvg(C[cat(t.ty)], t.dg)}
-      <div class="nm"><b>${esc(t.n || 'MMSI ' + t.m)}</b><span>${typeTxt(t.ty)} · ${t.s >= 0.5 ? spd(t.s) + ' ' + spdU() : (NAVST[t.st] || 'liegt')}${t.dst ? ' · nach ' + esc(t.dst) : ''}</span></div>
+      <div class="nm"><b>${esc(t.n || 'MMSI ' + t.m)}${t.m === ownM ? ' <em class="tag">mein Schiff</em>' : ''}</b><span>${typeTxt(t.ty)} · ${t.s >= 0.5 ? spd(t.s) + ' ' + spdU() : (NAVST[t.st] || 'liegt')}${t.dst ? ' · nach ' + esc(t.dst) : ''}</span></div>
       <div class="ds">${t.dist != null ? nmTxt(t.dist) : '–'}<span>${t.tcpa > 0 && t.tcpa < 3600 && t.s >= 0.5 ? 'CPA ' + nmTxt(t.cpa) : t.brg != null ? p3(t.brg) + '°' : ''}</span></div></div>`).join('')
     : `<div class="empty">${st === 'nokey' ? '<b>Kein gültiger AIS-Schlüssel</b>Ohne Schlüssel kommen keine Schiffsdaten an.' : st === 'rejected' ? '<b>AIS-Zugang gerade belegt</b>Zu viele Geräte gleichzeitig verbunden. Neuer Versuch läuft automatisch.' : q || listF !== 'all' ? '<b>Keine Treffer</b>Suche oder Filter ändern.' : '<b>Noch keine Schiffe empfangen</b>Liegende Schiffe melden sich nur alle paar Minuten.'}</div>`;
 }
@@ -1108,10 +1167,13 @@ function renderShip() {
   dBody.innerHTML = `<div class="sub"><span class="sw" style="background:${C[cat(t.ty)]}"></span>${typeTxt(t.ty)}${t.st != null && NAVST[t.st] ? ' · ' + NAVST[t.st] : ''}</div>
     <div class="hero">${hero}</div><dl class="kv">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
     <div class="actions"><button class="btn pri" id="sCenter"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2.4" class="f"/></svg>Auf Karte zeigen</button>
-    ${isOwn ? '<span class="note">Das ist dein eigenes Schiff.</span>' : '<button class="btn" id="sOwn">Ist mein Schiff</button>'}${navigator.share ? '<button class="btn" id="sShare">Teilen</button>' : ''}</div>`;
+    ${navigator.share ? '<button class="btn" id="sShare">Teilen</button>' : ''}</div>
+    ${isOwn ? `<div class="myship on"><svg viewBox="0 0 24 24"><path d="M12 3 18 18 12 15 6 18Z" class="f"/></svg><div><b>Dein Schiff</b><small>${onBoard === false ? `Du bist nicht an Bord (${nmTxt(boardDist)} entfernt) – Position kommt vom Tablet.` : 'Fahrt, Kurs und Kartenmitte kommen von seinem AIS.'}</small></div><button class="btn" id="sNotOwn">Nicht mehr mein Schiff</button></div>`
+      : `<button class="btn myship" id="sOwn"><svg viewBox="0 0 24 24"><path d="M12 3 18 18 12 15 6 18Z"/></svg>Das ist mein Schiff</button>`}`;
   const sh = $('#sShare'); if (sh) sh.onclick = () => navigator.share({ title: t.n || `MMSI ${t.m}`, text: `${t.n || 'Schiff'} (MMSI ${t.m}) · ${dm(t.la, true)} ${dm(t.lo, false)} · ${spd(t.s)} ${spdU()} · ${typeTxt(t.ty)}`, url: `${location.origin}${location.pathname}#ship=${t.m}` }).catch(() => {});
   $('#sCenter').onclick = () => { setFollow(false); map.easeTo({ center: ll(t.p || { lat: t.la, lon: t.lo }), zoom: Math.max(map.getZoom(), 14), duration: 700 }); };
-  const so = $('#sOwn'); if (so) so.onclick = () => ask(`<b>${esc(t.n || t.m)}</b> (MMSI ${t.m}) als eigenes Schiff festlegen?`, 'Festlegen').then((y) => { if (y) { S.mmsi = String(t.m); if (S.source === 'gps') S.source = 'fused'; save(); closeDrawer(); toast('Eigenes Schiff gespeichert'); } });
+  const so = $('#sOwn'); if (so) so.onclick = () => ask(`<b>${esc(t.n || t.m)}</b> als dein Schiff festlegen?<br><small class="note">Fahrt, Kurs und Kartenmitte kommen dann von seinem AIS, und es löst keine Warnung mehr aus. Bist du weit weg (nicht an Bord), nimmt die Seekarte automatisch die Position des Tablets.</small>`, 'Ja, mein Schiff').then((y) => { if (y) { closeDrawer(); setMyShip(t.m); } });
+  const sn = $('#sNotOwn'); if (sn) sn.onclick = () => ask(`<b>${esc(t.n || t.m)}</b> nicht mehr als dein Schiff verwenden?`, 'Entfernen').then((y) => { if (y) { S.notMine = [...(S.notMine || []), t.m].slice(-20); closeDrawer(); setMyShip(0); } });
 }
 function legendHtml() {
   const C = CATCOL[theme];
@@ -1143,7 +1205,8 @@ function renderLayers() {
 function srcStatusHtml() {
   const now = Date.now(), g = gps && now - gps.t < 300000, oa = S.mmsi ? ships.get(+S.mmsi) : null, oaF = oa && oa.la != null && now - oa.ts < 600000;
   return `<div class="status">GPS im Tablet: ${g ? `<b class="ok">empfängt</b> · ± ${Math.round(gps.acc)} m` : `<b class="warn">${gpsErr || 'noch kein Signal'}</b>`}<br>
-    AIS des eigenen Schiffs: ${!S.mmsi ? '<b class="warn">keine MMSI eingetragen</b>' : oaF ? `<b class="ok">empfängt</b> · ${esc(oa.n || S.mmsi)}, vor ${fmtAge(now - oa.ts)}` : '<b class="warn">noch nicht empfangen</b>'}
+    AIS des eigenen Schiffs: ${!S.mmsi ? '<b class="warn">kein Schiff festgelegt</b> – Schiff auf der Karte antippen → „Das ist mein Schiff“' : oaF ? `<b class="ok">empfängt</b> · ${esc(oa.n || S.mmsi)}, vor ${fmtAge(now - oa.ts)}` : '<b class="warn">noch nicht empfangen</b>'}
+    ${S.mmsi && boardDist != null ? `<br>Tablet ↔ Schiff: <b>${nmTxt(boardDist)}</b> · ${onBoard === false ? '<b class="warn">nicht an Bord</b> – Position kommt vom Tablet' : '<b class="ok">an Bord</b>'}` : ''}
     ${own && own.src === 'GPS+AIS' ? `<br>Abstand GPS ↔ AIS: <b>${Math.round(own.diff)} m</b> · Gewichtung GPS ${own.wG} % / AIS ${100 - own.wG} %` : ''}</div>`;
 }
 function aisStatusHtml() {
@@ -1246,7 +1309,7 @@ function onboarding(step) {
         ${ch('gps', '<svg viewBox="0 0 24 24"><circle cx="12" cy="10" r="3"/><path d="M12 21s-7-6.2-7-11a7 7 0 0 1 14 0c0 4.8-7 11-7 11Z"/></svg>', 'Nur GPS vom Tablet', 'Braucht ein Tablet mit GPS (iPad nur mit SIM-Karte).')}
         ${ch('ais', '<svg viewBox="0 0 24 24"><path d="M12 3 18 18 12 15 6 18Z"/><path d="M4 8a10 10 0 0 1 3-4M20 8a10 10 0 0 0-3-4"/></svg>', 'Nur AIS vom Schiff', 'Wenn das Tablet kein GPS hat. MMSI nötig.')}
       </div>
-      <div class="row" style="border:0"><div class="lbl"><b>MMSI deines Schiffs</b><small>9 Ziffern – im AIS-Gerät (Menü „Own Ship“) oder in der Frequenzzuteilungsurkunde. Für „Kombiniert“ und „AIS“.</small></div><input class="field wide" id="oMmsi" inputmode="numeric" maxlength="9" value="${esc(S.mmsi)}" placeholder="211…" autocomplete="off"></div>
+      <div class="row" style="border:0"><div class="lbl"><b>MMSI deines Schiffs</b><small>9 Ziffern – im AIS-Gerät (Menü „Own Ship“). Einfacher: später das Schiff auf der Karte antippen → „Das ist mein Schiff“.</small></div><input class="field wide" id="oMmsi" inputmode="numeric" maxlength="9" value="${esc(S.mmsi)}" placeholder="211…" autocomplete="off"></div>
       </div>${foot()}`);
     $('#chSrc').onclick = (e) => { const b = e.target.closest('button'); if (!b) return; S.source = b.dataset.v; save(); $('#chSrc').querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b)); };
   } else if (step === 2) {
@@ -1296,6 +1359,10 @@ function help() {
     <p>Die Schiffe kommen über das Internet von Empfangsstationen an Land – <b>nicht von deiner AIS-Anlage</b>. Nicht jedes Schiff wird empfangen, und Positionen kommen etwa alle 30–60 Sekunden (dazwischen rechnet die Karte mit Kurs und Fahrt weiter). Liegende Schiffe melden sich nur alle paar Minuten, Name und Typ bis zu 6 Minuten nach dem Öffnen – bis dahin ist ein Schiff grau. Zum Ausweichen gelten Radar und die eigene AIS-Anlage.</p>
     <h3>Symbole</h3><div class="legend">${legendHtml()}</div>
     <p class="note">Dreieck = fährt · kleines Dreieck mit Punkt = liegt (Spitze zeigt die Vorausrichtung) · Kreis = liegt, Richtung unbekannt · kleiner = Klasse B (Sportboot) · blass = seit 6 Minuten keine Meldung · rot mit Ring = kommt nahe. Nah herangezoomt erscheinen Schiffe in echter Größe.</p>
+    <h3>Mein Schiff</h3>
+    <p>Tippe dein Schiff auf der Karte an und wähle <b>„Das ist mein Schiff“</b>. Dann kommen Fahrt, Kurs und Kartenmitte von seinem AIS, es wird nicht mehr als fremdes Schiff gezeigt und löst keine Warnung aus.
+    Fährt das Tablet eine Weile genau mit einem Schiff mit, fragt die Seekarte von selbst: „Bist du an Bord?“.</p>
+    <p>Bist du <b>weit weg</b> (mehr als 1,5 km, z. B. zu Hause), merkt die Seekarte das am Standort des Tablets und nimmt automatisch die Tablet-Position. Dein Schiff erscheint dann orange umrandet als „mein Schiff“ auf der Karte. Kommst du zurück an Bord, wird es wieder automatisch verknüpft. Antippen → „Nicht mehr mein Schiff“ löst die Verknüpfung ganz.</p>
     <h3>Die Leiste oben</h3>
     <p><b>Fahrt · SOG</b> = Fahrt über Grund, <b>Kurs · COG</b> = Kurs über Grund, <b>Voraus · HDG</b> = wohin der Bug zeigt (nur über AIS). Dazu Position und Quelle: <b>GPS</b> (Tablet), <b>AIS</b> (dein Schiff) oder <b>GPS + AIS</b> gemittelt – dann zeigen zwei kleine Punkte die Einzelwerte (blau GPS, grün AIS). Im Nord-Ostsee-Kanal erscheint der <b>NOK-km</b>.</p>
     <h3>Knöpfe rechts</h3>
@@ -1453,7 +1520,7 @@ let tickN = 0;
 function tick() {
   if (document.hidden) return;
   if (pendingShip && ships.get(pendingShip)?.la != null) { const t = ships.get(pendingShip); pendingShip = null; setFollow(false); select(t.m); map.jumpTo({ center: [t.lo, t.la], zoom: 14 }); }
-  fuse(); render(); renderStrip(); renderAlert(); renderNear(); steerMap();
+  fuse(); checkSuggest(Date.now()); render(); renderStrip(); renderAlert(); renderNear(); steerMap();
   if (drawer && Date.now() - drawerTouch > 1500 && !(document.activeElement && /INPUT/.test(document.activeElement.tagName) && dBody.contains(document.activeElement))) {
     if (drawer === 'list' || drawer === 'settings' || drawer === 'ship' || (drawer === 'tide' && tickN % 10 === 0)) renderDrawer(false);
   }
