@@ -1,7 +1,7 @@
 // Service Worker Seekarte Live: App startet offline; Karten-/Tiefenkacheln: Cache zuerst (≤ 7 Tage frisch → kein Netzabruf,
 // sonst aus dem Cache sofort anzeigen und im Hintergrund auffrischen). Eigener Zeitstempel, weil "Date" bei CORS nicht lesbar ist.
 // Neue Version wartet, bis die Seite "skip" schickt (Hinweis „Neue Version verfügbar“).
-const VER = '2.2.0', APP = 'sk-app-' + VER, TILES = 'sk-tiles-4', DATA = 'sk-data-1';
+const VER = '2.3.0', APP = 'sk-app-' + VER, TILES = 'sk-tiles-4', DATA = 'sk-data-1';
 const CDN = 'https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/4.7.1/';
 const SHELL = ['./', 'index.html', 'app.css?v=' + VER, 'app.js?v=' + VER, 'manifest.webmanifest', 'icon.svg', 'icon-180.png', 'nok_km.json', 'gauges.json', CDN + 'maplibre-gl.js', CDN + 'maplibre-gl.min.css'];
 self.addEventListener('install', (e) => {
