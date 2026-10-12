@@ -17,7 +17,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/4.7.1/maplibre-gl.min.css" crossorigin="anonymous">
-<link rel="stylesheet" href="app.css?v=2.2.0">
+<link rel="stylesheet" href="app.css?v=2.3.0">
 </head>
 <body>
 <div id="map" aria-label="Seekarte"></div>
@@ -61,6 +61,7 @@
 
 <!-- Info unten links: nächstes Schiff / Messung / Tipp-Position -->
 <div id="hud">
+  <div id="suggest" hidden></div>
   <button id="mobCard" type="button" hidden></button>
   <button id="near" type="button" hidden></button>
   <div id="probe" hidden></div>
@@ -76,6 +77,6 @@
 <div id="modal" hidden><div class="mbox" role="dialog" aria-modal="true"><div id="mBody"></div></div></div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/4.7.1/maplibre-gl.js" crossorigin="anonymous"></script>
-<script src="app.js?v=2.2.0"></script>
+<script src="app.js?v=2.3.0"></script>
 </body>
 </html>
